@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"io/ioutil"
 	_ "io/ioutil" // Import the ioutil package
@@ -9,6 +10,7 @@ import (
 	"sort"
 	"sync"
 	"time"
+	"unsafe"
 )
 
 // Item represents a single entry with a timestamp and a string value.
@@ -27,7 +29,51 @@ func (p ItemList) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
 var (
 	items ItemList
 	mu    sync.Mutex // Add a mutex for thread safety
+	// longPollingClients is a slice to hold channels for long polling clients.
+	longPollingClients = make(map[uintptr]chan ItemList) // Use a map
+	longPollingMu      sync.Mutex                        // Mutex for long polling clients
 )
+
+// LongPollHandler handles long polling requests.
+func LongPollHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Create a channel for this client.
+	clientChan := make(chan ItemList)
+	longPollingMu.Lock()
+	longPollingClients[uintptr(unsafe.Pointer(&clientChan))] = clientChan // Store channel with its address as key
+	longPollingMu.Unlock()
+
+	// Remove the client channel when the connection closes.
+	defer func() {
+		longPollingMu.Lock()
+		delete(longPollingClients, uintptr(unsafe.Pointer(&clientChan))) // Directly delete using the key
+		longPollingMu.Unlock()
+	}()
+
+	// Create a context with a timeout
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	// Wait for new data or a timeout.
+	for { // Loop to keep the connection alive
+		select {
+		case <-ctx.Done(): // Context canceled (timeout)
+			http.Error(w, "Timeout", http.StatusRequestTimeout)
+			return
+		case data := <-clientChan:
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(data)
+			// Flush the response writer to send the data immediately
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		}
+	}
+}
 
 // PutHandler handles the PUT request to add a string with a timestamp.
 func PutHandler(w http.ResponseWriter, r *http.Request) {
@@ -58,6 +104,21 @@ func PutHandler(w http.ResponseWriter, r *http.Request) {
 	mu.Unlock() // Release the lock
 
 	w.WriteHeader(http.StatusCreated)
+	updateClientsWithData()
+}
+
+// updateClientsWithData sends the current 'items' data to all long-polling clients.
+func updateClientsWithData() {
+	longPollingMu.Lock()
+	defer longPollingMu.Unlock()
+
+	for _, clientChan := range longPollingClients {
+		select {
+		case clientChan <- items: // Send the current 'items' data
+		default:
+			// Handle the case where the client channel is full (optional)
+		}
+	}
 }
 
 // GetHandler handles the GET request to retrieve all strings with timestamps.
@@ -74,7 +135,14 @@ func GetHandler(w http.ResponseWriter, r *http.Request) {
 	mu.Unlock()       // Release the lock
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(data)
+	// Use json.MarshalIndent for pretty printing
+	jsonData, err := json.MarshalIndent(data, "", "  ") // Indent with 2 spaces
+	if err != nil {
+		http.Error(w, "Failed to marshal JSON", http.StatusInternalServerError)
+		return
+	}
+
+	w.Write(jsonData)
 }
 
 // SearchHandler handles the GET request to search for items matching a regex.

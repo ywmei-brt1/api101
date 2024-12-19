@@ -64,5 +64,5 @@ On linux or max, you can use `open image.png` to directly open the QR code once 
 curl -X PUT                     \
   -H "Content-Type: application/json" \
   -d '{"link": "https://meet.google.com/oqn-ybdc-nbi?authuser=0"}' \
-  http://localhost:8080/generate-qr > image.png && open image.png
+  https://api101-2fp4.onrender.com/generate-qr > image.png && open image.png
 ```

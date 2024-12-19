@@ -3,15 +3,31 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	_ "io/ioutil" // Import the ioutil package
 	"net/http"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 	"unsafe"
+
+	"github.com/skip2/go-qrcode"
 )
+
+// For generateQR API
+type GenerateRequest struct {
+	Link string `json:"link"`
+}
+
+// For generateQR API
+type GenerateResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+	Image   []byte `json:"image,omitempty"` // Optional for image data
+}
 
 // Item represents a single entry with a timestamp and a string value.
 type Item struct {
@@ -177,4 +193,82 @@ func SearchHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(results)
+}
+
+func GenerateQR(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		fmt.Fprintf(w, "Method %s not allowed", r.Method)
+		return
+	}
+
+	var req GenerateRequest
+	decoder := json.NewDecoder(r.Body)
+	err := decoder.Decode(&req)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, "Error parsing request body: %v", err)
+		return
+	}
+
+	// Validate link format (optional, adjust as needed)
+	if !isValidGoogleMeetLink(&req) {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, "Invalid Google Meet link format: %v", req.Link)
+		return
+	}
+
+	qr, err := qrcode.New(req.Link, qrcode.Medium)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "Error generating QR code: %v", err)
+		return
+	}
+
+	qrImage, err := qr.PNG(256) // Adjust size as needed
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "Error encoding QR code as PNG: %v", err)
+		return
+	}
+
+	response := GenerateResponse{Success: true, Message: "QR code generated successfully"}
+	response.Image = qrImage
+
+	// Set the Content-Type header
+	w.Header().Set("Content-Type", "image/png")
+	// Write the image data directly to the response writer
+	_, err = w.Write(qrImage)
+	if err != nil {
+		http.Error(w, "Error writing image to response", http.StatusInternalServerError)
+		return
+	}
+}
+
+func isValidGoogleMeetLink(req *GenerateRequest) bool {
+	// Check for valid base URL prefix
+	if !strings.HasPrefix(req.Link, "https://meet.google.com/") {
+		return false
+	}
+
+	// Attempt to split and extract meeting code
+	urlParts := strings.SplitN(req.Link, "?", 2)
+	if len(urlParts) == 1 { // No query parameters
+		return true // Valid format without query parameters
+	}
+
+	// Try to reset link with just base URL
+	req.Link = urlParts[0] // Reset link to base URL
+
+	// Validate meeting code format (optional)
+	// Replace this with your logic to check the validity of the meeting code in urlParts[0][1:]
+	// You can use regular expressions or other techniques for stricter validation
+	return true // Assuming we don't perform additional validation here
+
+	// Alternatively, you could return true conditionally based on further validation
+	// if validateMeetingCode(urlParts[0][1:]) {
+	//     return true
+	// } else {
+	//     return false // Invalid meeting code format even after reset
+	// }
 }
